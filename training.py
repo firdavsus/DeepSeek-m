@@ -17,8 +17,6 @@ def prepare_data_char(path):
     stoi = {ch: i for i, ch in enumerate(chars)}
     itos = {i: ch for i, ch in enumerate(chars)}
 
-    text = text[:len(text)//20]
-
     config.vocab_size = len(stoi)
     print(f"Vocab size: {config.vocab_size}")
 
@@ -114,3 +112,4 @@ if __name__ == "__main__":
 
     # final model
     torch.save(model_simple.state_dict(), "model-cocnut.pt")
+
