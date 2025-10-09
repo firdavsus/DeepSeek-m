@@ -96,7 +96,13 @@ def train(model, data, stoi, itos, epochs, print_each=1000):
 if __name__ == "__main__":
     data, stoi, itos = prepare_data_char("summary.txt")
     model_simple = LLM().to(device)
-    model_simple.load_state_dict(torch.load("model.pt"))
+
+    # trainign without cocnut
+    train(model_simple, data, stoi, itos, epochs=7)
+    torch.save(model_simple.state_dict(), "model-simple.pt")
+
+    # adding coconut
+    model_simple.load_state_dict(torch.load("model-simple.pt"))
     model = Coconut(
         model_simple, 
         num_latents=config.num_latents, 
@@ -105,4 +111,6 @@ if __name__ == "__main__":
         inner_lr=5e-4
     )
     train(model, data, stoi, itos, epochs=13)
-    torch.save(model_simple.state_dict(), "model.pt")
+
+    # final model
+    torch.save(model_simple.state_dict(), "model-cocnut.pt")
