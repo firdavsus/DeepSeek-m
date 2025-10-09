@@ -1,0 +1,50 @@
+''' main optimizations:
+
+    -hard:
+    Multi-Head Latent Attention (MLA)
+    MoE
+
+    -average diff:
+    RoPE pos enc 
+    Latent thinking (coconut paper)
+
+    -ez ones:
+    +Muno optimizer
+    +swiGLU
+    +RMSNorm
+    +initialization
+'''
+
+characteristics will remain the same to be fair
+simple one: 
+    loss: 1.7696
+    sentence: Good Morning Holms said on his as member charp room finantance that he dep
+
+with RMSNorm:
+    loss:   1.7531 + 
+    senetnce: Good Morning Holms said in severe the place, and domic point a line to wha
+
+with swiGLU:
+    loss: 1.6755 +
+    senetnce: Good Morning Holms said Mich. Founder of so him stotfinal and consumer ju
+
+with MuonOptimizer:
+    loss: 1.5055 +
+    sentence: Good Morning Holms said presses. There is now placed on European das with
+
+with initialization:
+    loss: 1.5507
+    sentence: Good Morning Holms said So sake it is that both the markets of secures and
+
+with RoPE pos enc:
+    loss: 1.5620
+    sentence: Good Morning Holms said pelace; but the command were contract said. SYDNB
+
+# model up
+with COCONUT:
+    loss:
+    sentence:
+
+with MoE & MLA:
+    loss: 
+    sentence:

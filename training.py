@@ -3,6 +3,7 @@ from cocnut import Coconut
 import torch
 import torch.nn.functional as F
 from muon import Muon
+import pickle
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -17,7 +18,7 @@ def prepare_data_char(path):
     stoi = {ch: i for i, ch in enumerate(chars)}
     itos = {i: ch for i, ch in enumerate(chars)}
 
-    text = text[:len(text)//20]
+    text = text[:len(text)//2]
 
     config.vocab_size = len(stoi)
     print(f"Vocab size: {config.vocab_size}")
@@ -69,14 +70,14 @@ def train(model, data, stoi, itos, epochs, print_each=1000, coconut=False):
                     logits.reshape(-1, config.vocab_size),
                     single[:, 1:].reshape(-1)
                 )
-                loss += 0.0001 * aux_loss
+                loss += 0.0005 * aux_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer_adam.step()
 
             if idx%print_each==0:
-                print(f"Epoch {epoch} Loss: {loss.item():.4f} aux_loss: {aux_loss.item():.4f}")
+                print(f"Epoch {epoch} Loss: {loss.item():.4f} aux_loss: {aux_loss.item():.4f} --- {idx}/{len(data)//config.batch_size}")
                 model.eval()
                 with torch.no_grad():
                     prompt = "Good Morning Holms said "
@@ -97,17 +98,29 @@ def train(model, data, stoi, itos, epochs, print_each=1000, coconut=False):
             generated_text = "".join([itos[i.item()] for i in output])
             print(f"loss: {loss.item():.4f} aux_loss: {aux_loss.item():.4f} Sample: {generated_text}")
         model.train()
+        if coconut:
+            torch.save(model.state_dict(), "model-coconut.pt")
+        else:
+            torch.save(model_simple.state_dict(), "model-simple.pt")
 
 if __name__ == "__main__":
     data, stoi, itos = prepare_data_char("summary.txt")
+    #saving stoi, tios
+    with open("stoi.pkl", "wb") as f:
+        pickle.dump(stoi, f)
+
+    with open("itos.pkl", "wb") as f:
+        pickle.dump(itos, f)
+    print("vocab saved!")
+
     model_simple = LLM().to(device)
 
     # trainign without cocnut
     config.batch_size = 400
     train(model_simple, data, stoi, itos, epochs=7)
     torch.save(model_simple.state_dict(), "model-simple.pt")
-    
-    print("done now with coconut!")
+
+    print("done, now with a coconut!")
 
     # adding coconut
     model_simple.load_state_dict(torch.load("model-simple.pt"))
@@ -116,10 +129,11 @@ if __name__ == "__main__":
         num_latents=config.num_latents, 
         num_reasoning_steps=config.num_reasoning_steps, 
         top_k=config.top_k_samples, 
-        inner_lr=5e-4
+        inner_lr=5e-5
     )
     config.batch_size = 256
     train(model, data, stoi, itos, epochs=13, coconut=True)
 
     # final model
-    torch.save(model_simple.state_dict(), "model-cocnut.pt")
+    torch.save(model_simple.state_dict(), "model-coconut.pt")
+    print("final model is ready!!!")

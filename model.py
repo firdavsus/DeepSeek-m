@@ -7,21 +7,21 @@ from torch.utils.checkpoint import checkpoint
 class Config:
     def __init__(self):
         self.vocab_size=100
-        self.embed_size = 128
-        self.heads_size = 2
+        self.embed_size = 64
+        self.heads_size = 4
         self.num_layers = 2
         self.max_len = 100
         self.dropout = 0.1
         self.batch_size = 350
-        self.d_rope = 16
+        self.d_rope = 8
         self.ff_hidden_mult=4
-        self.ffn_dim = 96
-        self.n_shared = 2
+        self.ffn_dim = 48
+        self.n_shared = 1
         self.n_experts = 2
         self.top_k_experts = 1
-        self.d_kv_comp = 96
-        self.num_latents=2
-        self.num_reasoning_steps=2
+        self.d_kv_comp = 48
+        self.num_latents=1
+        self.num_reasoning_steps=1
         self.top_k_samples=40
 
 config = Config()
@@ -179,6 +179,10 @@ class MLA(nn.Module):
         q = torch.cat([q_base, q_rot], dim=-1)
         k = torch.cat([k, k_rot], dim=-1)
 
+        assert q.shape == k.shape, f"q/k shape mismatch: {q.shape} vs {k.shape}"
+        assert q_base.shape[:-1] == q_rot.shape[:-1]
+        assert q_base.size(-1) + q_rot.size(-1) == self.d_head
+
         scores = torch.einsum("bqhd,bkhd->bhqk", q, k) / math.sqrt(self.d_head)
         mask = torch.tril(torch.ones(seq_len, seq_len, device=h.device)).unsqueeze(0).unsqueeze(0)
         scores = scores.masked_fill(mask == 0, float('-inf'))
@@ -247,121 +251,3 @@ class LLM(nn.Module):
             context = torch.cat((context, next_token), dim=1)  # Append to sequence
         return context
     
-
-
-
-
-
-
-
-
-
-
-#################### simple 
-# class Attention(nn.Module):
-#     def __init__(self, embed_size, heads_size):
-#         super().__init__()
-#         assert embed_size % heads_size == 0, "Embed size must be divisible by number of heads"
-
-#         self.embed_size = embed_size
-#         self.heads_size = heads_size
-#         self.head_dim = embed_size // heads_size
-
-#         self.Q = nn.Linear(embed_size, embed_size, bias=False)
-#         self.K = nn.Linear(embed_size, embed_size, bias=False)
-#         self.V = nn.Linear(embed_size, embed_size, bias=False)
-
-#         self.out_proj = nn.Linear(embed_size, embed_size)
-
-#     @staticmethod
-#     def generate_causal_mask(seq_len, device="cpu"):
-#         return torch.tril(torch.ones(seq_len, seq_len, device=device)).unsqueeze(0).unsqueeze(0)
-
-#     def forward(self, x, mask=None):
-#         B, T, E = x.shape
-#         assert E == self.embed_size, "Input embedding dim mismatch"
-
-#         if mask is None:
-#             mask = self.generate_causal_mask(T, device=x.device)
-
-#         Q = self.Q(x)
-#         K = self.K(x)
-#         V = self.V(x)
-
-#         Q = Q.view(B, T, self.heads_size, self.head_dim).transpose(1, 2)
-#         K = K.view(B, T, self.heads_size, self.head_dim).transpose(1, 2)
-#         V = V.view(B, T, self.heads_size, self.head_dim).transpose(1, 2)
-
-#         scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)
-
-#         scores = scores.masked_fill(mask == 0, float('-inf'))
-
-#         attn_weights = F.softmax(scores, dim=-1)
-#         attn_output = torch.matmul(attn_weights, V) 
-
-#         attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, self.embed_size)
-
-#         out = self.out_proj(attn_output)
-#         return out
-
-
-# class Block_ez(nn.Module):
-#     def __init__(self, embed_size, heads_size, ff_hidden_mult=4, dropout=0.2):
-#         super().__init__()
-#         self.attention = Attention()
-#         self.norm1 = nn.LayerNorm(embed_size)
-#         self.norm2 = nn.LayerNorm(embed_size)
-
-#         hidden_dim = embed_size * ff_hidden_mult
-#         self.ffn = nn.Sequential(
-#             nn.Linear(embed_size, hidden_dim),
-#             nn.GELU(),
-#             nn.Linear(hidden_dim, embed_size),
-#         )
-
-#         self.dropout = nn.Dropout(dropout)
-
-#     def forward(self, x):
-#         attn_out = self.attention(x) 
-#         x = self.norm1(x + self.dropout(attn_out))
-
-#         ffn_out = self.ffn(x)
-#         x = self.norm2(x + self.dropout(ffn_out))
-
-#         return x
-    
-# class SimpleTransformerLM(nn.Module):
-#     def __init__(self, vocab_size, embed_size, heads_size, num_layers, max_len, dropout=0.2):
-#         super().__init__()
-#         self.token_emb = nn.Embedding(vocab_size, embed_size)
-#         self.pos_emb   = nn.Embedding(max_len, embed_size)
-#         self.blocks    = nn.ModuleList(
-#             [Block_ez(embed_size, heads_size, dropout=dropout) for _ in range(num_layers)]
-#         )
-#         self.ln_f = nn.LayerNorm(embed_size)
-#         self.lm_head = nn.Linear(embed_size, vocab_size, bias=False)
-
-#         self.stoi = None
-#         self.itos = None
-
-#     def forward(self, idx):
-#         B, T = idx.size()
-#         position = torch.arange(T, device=idx.device).unsqueeze(0)
-#         x = self.token_emb(idx) + self.pos_emb(position)
-#         for block in self.blocks:
-#             x = block(x)
-#         x = self.ln_f(x)
-#         logits = self.lm_head(x)
-#         return logits, 0.0
-    
-#     @torch.no_grad()
-#     def sample(self, context, max_new_tokens, temperature=1.0):
-#         for _ in range(max_new_tokens):
-#             # Crop context if longer than allowed
-#             idx_cond = context if context.size(1) <= self.pos_emb.num_embeddings else context[:, -self.pos_emb.num_embeddings:]
-#             logits, _ = self(idx_cond)  # (1, T, vocab_size)
-#             logits = logits[:, -1, :] / temperature  # Get last token's logits
-#             probs = F.softmax(logits, dim=-1)
-#             next_token = torch.multinomial(probs, num_samples=1)  # Sample from probs
-#             context = torch.cat((context, next_token), dim=1)  # Append to sequence
-#         return context

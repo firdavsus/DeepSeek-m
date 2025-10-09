@@ -72,9 +72,16 @@ class Coconut(nn.Module):
             lr = self.inner_lrs[step] if self.inner_lrs.numel() > 1 else self.inner_lrs[0]
 
             # gradient descent update on latents (we keep latents as a differentiable tensor)
+            grads = torch.clamp(grads, -0.5, 0.5)
+
+            # update latents with smaller inner LR
             latents = latents - lr * grads
-            latents = torch.clamp(latents, -10, 10)  # <- stability clamp
-            latents = latents.detach().requires_grad_(True)  # see below
+
+            # clamp latents to a tighter range
+            latents = torch.clamp(latents, -5, 5)
+
+            # keep as differentiable node for next step
+            latents = latents.detach().requires_grad_(True)
             # ensure next latents is a differentiable node (it already is), keep requires_grad True
 
         logits_all_final, aux_loss = self._run_blocks_on_embeddings(sot, latents, prompt_embed, eot=eot)
