@@ -15,23 +15,18 @@ def generate(input):
 
 if __name__ == "__main__":
     # loading model
-    model_simple = LLM().load_state_dict(torch.load("model-coconut.pt")).to(device)
+    model_simple = LLM().to(device)
     model = Coconut(
         model_simple, 
         num_latents=config.num_latents, 
         num_reasoning_steps=config.num_reasoning_steps, 
         top_k=config.top_k_samples, 
     )
-
-    #loading config
-    with open("stoi.pkl", "rb") as f:
-        stoi = pickle.load(f)
-
-    with open("itos.pkl", "rb") as f:
-        itos = pickle.load(f)
+    model, stoi, itos = Coconut.load_the_model("weights/model-6.pt", model)
+    model.model.to(device)
 
     model.eval()
     while True:
-        input = input("prompt: ")
-        if input == "exit": break
-        generate(input)
+        input_in = input("prompt: ")
+        if input_in == "exit": break
+        generate(input_in)

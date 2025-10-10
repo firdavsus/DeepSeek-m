@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import repeat
+from model import config, LLM
 
 class Coconut(nn.Module):
     def __init__(self, transformer, num_latents=3, num_reasoning_steps=3, inner_lr=0.001, top_k=50):
@@ -28,20 +29,22 @@ class Coconut(nn.Module):
 
     def _run_blocks_on_embeddings(self, sot, latents, prompt_embed, eot=None):
         x = torch.cat([sot, latents, prompt_embed] + ([] if eot is None else [eot]), dim=1)  # [B, L, D]
-        for block in self.model.blocks:
-            # block(x) returns (x, new_kv)
-            x, _ = block(x)
-        x = self.model.ln_f(x)
-        logits_all = self.model.lm_head(x)  # [B, L, V]
+        total_aux_loss = 0.0
 
-        # collect aux_loss (if blocks accumulate them). Convert python floats -> tensors
-        aux_loss = torch.tensor(0.0, device=x.device)
         for block in self.model.blocks:
-            if hasattr(block, "moe") and hasattr(block.moe, "aux_loss"):
-                aux_loss = aux_loss + torch.tensor(getattr(block.moe, "aux_loss", 0.0), device=x.device)
-        return logits_all, aux_loss
+            x, _ = block(x)
+            total_aux_loss += block.moe.aux_loss
+        x = self.model.ln_f(x)
+        logits = self.model.lm_head(x)
+        return logits, total_aux_loss
+        return logits, aux_loss
 
     def forward(self, idx):
+        INNER_GRAD_MAX_NORM = 0.5  
+        LATENT_CLAMP = 3.0    
+        INNER_LR_MAX = 1e-3      
+        LATENT_L2_REG = 1e-5  
+
         device = idx.device
         B, T = idx.shape
 
@@ -53,9 +56,9 @@ class Coconut(nn.Module):
 
         latents = latents_base.clone().detach().requires_grad_(True)  # leaf tensor with grads
 
-        for step in range(self.num_reasoning_steps):
-            logits_all, _ = self._run_blocks_on_embeddings(sot, latents, prompt_embed, eot=None)
-            # logits_all shape: [B, 1 + n + T, V]; prompt logits occupy positions [1+n : 1+n+T)
+        for step in range(self.num_reasoning_steps): 
+            # ... inside your forward, per step:
+            logits_all, _ = self._run_blocks_on_embeddings(sot, latents, prompt_embed, eot=eot)
             logits_prompt = logits_all[:, 1 + self.num_latents : 1 + self.num_latents + T, :]  # [B, T, V]
 
             if T <= 1:
@@ -63,70 +66,128 @@ class Coconut(nn.Module):
             else:
                 inner_logits = logits_prompt[:, :-1, :].reshape(-1, logits_prompt.size(-1))  # [B*(T-1), V]
                 inner_targets = idx[:, 1:].reshape(-1)  # [B*(T-1)]
-                inner_loss = F.cross_entropy(inner_logits, inner_targets)
+                inner_loss = F.cross_entropy(inner_logits, inner_targets, reduction='mean')
 
-            # compute gradients w.r.t. latents (only). create_graph=True so we can backprop through inner updates
-            grads = torch.autograd.grad(inner_loss, latents, create_graph=True, retain_graph=True)[0]
+            inner_loss = inner_loss + LATENT_L2_REG * latents.pow(2).mean()
 
-            # step size for this inner iteration (learnable)
-            lr = self.inner_lrs[step] if self.inner_lrs.numel() > 1 else self.inner_lrs[0]
+            inner_loss = torch.nan_to_num(inner_loss, nan=0.0, posinf=1e3, neginf=-1e3)
 
-            # gradient descent update on latents (we keep latents as a differentiable tensor)
-            grads = torch.clamp(grads, -0.5, 0.5)
+            grads = torch.autograd.grad(inner_loss, latents, create_graph=True, allow_unused=True)[0]
+            if grads is None:
+                grads = torch.zeros_like(latents)
 
-            # update latents with smaller inner LR
+            grads = torch.nan_to_num(grads, nan=0.0, posinf=1e3, neginf=-1e3)
+
+            B = grads.shape[0]
+            grads_view = grads.view(B, -1)
+            grad_norm = grads_view.norm(dim=1).clamp_min(1e-6)  # [B]
+            scale = (INNER_GRAD_MAX_NORM / grad_norm).clamp(max=1.0)  # [B]
+            scale = scale.view(B, *([1] * (grads.dim()-1)))  # broadcast shape back to grads
+            grads = grads * scale
+
+            raw_lr = self.inner_lrs[step] if self.inner_lrs.numel() > 1 else self.inner_lrs[0]
+            lr = F.softplus(raw_lr)             # ensures >0
+            lr = lr.clamp(max=INNER_LR_MAX)     # limit magnitude
+
             latents = latents - lr * grads
 
-            # clamp latents to a tighter range
-            latents = torch.clamp(latents, -5, 5)
-
-            # keep as differentiable node for next step
-            latents = latents.detach().requires_grad_(True)
-            # ensure next latents is a differentiable node (it already is), keep requires_grad True
+            latents = torch.clamp(latents, -LATENT_CLAMP, LATENT_CLAMP)
 
         logits_all_final, aux_loss = self._run_blocks_on_embeddings(sot, latents, prompt_embed, eot=eot)
         logits_prompt_final = logits_all_final[:, 1 + self.num_latents : 1 + self.num_latents + T, :]  # [B, T, V]
 
         return logits_prompt_final, aux_loss
+    
+    def save_the_model(self, path, stoi, itos):
+        checkpoint = {
+            "transformer_state": self.model.state_dict(),  # transformer weights
+            "coconut_state": self.state_dict(),           # latents, sot, eot, inner_lrs
+            "stoi": stoi,                                    # vocabulary: token -> index
+            "itos": itos                                     # vocabulary: index -> token
+        }
+
+        torch.save(checkpoint, path)
+    
+    @staticmethod
+    def load_the_model(path, coconut):
+        checkpoint = torch.load(path, map_location="cpu")  
+
+        stoi = checkpoint["stoi"]
+        itos = checkpoint["itos"]
+
+        if coconut.model.token_emb.num_embeddings != len(stoi):
+            config.vocab_size = len(stoi)
+            coconut.model = LLM()
+        coconut.model.load_state_dict(checkpoint["transformer_state"])
+
+        coconut.load_state_dict(checkpoint["coconut_state"])
+
+        return coconut, stoi, itos
 
     @torch.no_grad()
-    def sample(self, context, max_new_tokens=20, temperature=1.0, run_inner_at_inference=False):
+    def sample(self, context, max_new_tokens=20, temperature=1.0, run_inner_at_inference=True):
+        # NOTE: do NOT use @torch.no_grad() decorator on this method
+        self.model.eval()
         device = context.device
         B, T = context.shape
 
         latents = repeat(self.latents, "n d -> b n d", b=B).to(device)
         sot = repeat(self.sot, "1 d -> b 1 d", b=B).to(device)
+        eot = repeat(self.eot, "1 d -> b 1 d", b=B).to(device)
         prompt_embed = self.model.token_emb(context)
 
-        if run_inner_at_inference:
-            # do inner steps in eval mode but without gradient accumulation
-            latents = latents.clone().detach().requires_grad_(True)
-            for step in range(self.num_reasoning_steps):
-                logits_all, _ = self._run_blocks_on_embeddings(sot, latents, prompt_embed, eot=None)
-                logits_prompt = logits_all[:, 1 + self.num_latents : 1 + self.num_latents + T, :]
-                if T <= 1:
-                    break
-                inner_logits = logits_prompt[:, :-1, :].reshape(-1, logits_prompt.size(-1))
-                inner_targets = context[:, 1:].reshape(-1)
-                inner_loss = F.cross_entropy(inner_logits, inner_targets)
-                grads = torch.autograd.grad(inner_loss, latents, create_graph=False)[0]
-                lr = self.inner_lrs[step] if self.inner_lrs.numel() > 1 else self.inner_lrs[0]
-                latents = (latents - lr * grads).detach()  # detach to avoid storing graphs in sampling
+        if run_inner_at_inference and self.num_reasoning_steps > 0:
+            # Enable gradient computation for inner optimization (but only here)
+            with torch.enable_grad():
+                # start with latents that require grad
+                latents = latents.clone().detach().requires_grad_(True)
 
+                for step in range(self.num_reasoning_steps):
+                    logits_all, _ = self._run_blocks_on_embeddings(sot, latents, prompt_embed, eot=eot)
+                    logits_prompt = logits_all[:, 1 + self.num_latents : 1 + self.num_latents + T, :]
+                    if T <= 1:
+                        break
+
+                    inner_logits = logits_prompt[:, :-1, :].reshape(-1, logits_prompt.size(-1))
+                    inner_targets = context[:, 1:].reshape(-1)
+                    inner_loss = F.cross_entropy(inner_logits, inner_targets)
+
+                    # compute grads wrt latents (no create_graph -> no higher-order graph)
+                    grads = torch.autograd.grad(inner_loss, latents, create_graph=False, allow_unused=True)[0]
+                    if grads is None:
+                        grads = torch.zeros_like(latents)
+
+                    # get lr (tensor), make scalar
+                    raw_lr = self.inner_lrs[step] if self.inner_lrs.numel() > 1 else self.inner_lrs[0]
+                    lr = F.softplus(raw_lr).clamp(max=1e-3)  # or your config
+
+                    # update latents WITHOUT tracking this update in the graph
+                    with torch.no_grad():
+                        latents.sub_(lr * grads)           # in-place update (efficient)
+                        # optional clamp to keep values stable
+                        latents.clamp_(-3.0, 3.0)
+
+                    # re-enable grad for the next inner iteration
+                    latents.requires_grad_(True)
+
+        # Now do generation under no_grad (efficient)
         out_tokens = [context[:, i:i+1] for i in range(T)]
-        for _ in range(max_new_tokens):
-            idx_cond = torch.cat(out_tokens, dim=1)  # [B, cur_len]
-            maybe = self.model(idx_cond)
-            if isinstance(maybe, tuple):
-                logits, _ = maybe
-            else:
-                logits = maybe
-            last_logits = logits[:, -1, :] / temperature
-            if self.top_k is not None:
-                v, ix = torch.topk(last_logits, self.top_k)
-                mask = torch.full_like(last_logits, float('-inf'))
-                last_logits = mask.scatter(1, ix, v)
-            probs = F.softmax(last_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            out_tokens.append(next_token)
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                idx_cond = torch.cat(out_tokens, dim=1)  # [B, cur_len]
+                logits, _ = self.model(idx_cond)
+                last_logits = logits[:, -1, :] / max(temperature, 1e-8)
+                if self.top_k is not None:
+                    v, ix = torch.topk(last_logits, self.top_k)
+                    mask = torch.full_like(last_logits, float('-inf'))
+                    last_logits = mask.scatter(1, ix, v)
+                probs = F.softmax(last_logits, dim=-1)
+                # protect against NaNs / zero-sum
+                probs = torch.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
+                probs = probs / probs.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+                next_token = torch.multinomial(probs, num_samples=1)
+                out_tokens.append(next_token)
+
+        self.model.train()
         return torch.cat(out_tokens, dim=1)
+
