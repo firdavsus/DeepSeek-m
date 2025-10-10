@@ -7,22 +7,23 @@ from torch.utils.checkpoint import checkpoint
 class Config:
     def __init__(self):
         self.vocab_size=100
-        self.embed_size = 64
+        self.embed_size = 256
         self.heads_size = 4
-        self.num_layers = 2
-        self.max_len = 100
-        self.dropout = 0.1
-        self.batch_size = 350
+        self.num_layers = 4
+        self.max_len = 256
+        self.dropout = 0.05
+        self.batch_size = 64
         self.d_rope = 8
         self.ff_hidden_mult=4
-        self.ffn_dim = 48
+        self.ffn_dim = 96
         self.n_shared = 1
-        self.n_experts = 2
+        self.n_experts = 4
         self.top_k_experts = 1
-        self.d_kv_comp = 48
+        self.d_kv_comp = 96
         self.num_latents=1
         self.num_reasoning_steps=1
         self.top_k_samples=40
+        self.special_tokens = ["<sos>","<eos>","<pad>", "<unk>"]
 
 config = Config()
 
