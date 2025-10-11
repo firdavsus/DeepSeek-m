@@ -15,6 +15,23 @@
     +initialization
 '''
 
+model specification
+        self.embed_size = 128
+        self.heads_size = 2
+        self.num_layers = 2
+        self.max_len = 100
+        self.dropout = 0.05
+        self.batch_size = 512
+        self.d_rope = 8
+        self.ff_hidden_mult=4
+        self.ffn_dim = 32
+        self.n_shared = 1
+        self.n_experts = 4
+        self.top_k_experts = 1
+        self.d_kv_comp = 32
+        self.num_latents=1
+        self.num_reasoning_steps=1
+
 characteristics will remain the same to be fair
 simple one: 
     loss: 1.7696
@@ -41,10 +58,26 @@ with RoPE pos enc:
     sentence: Good Morning Holms said pelace; but the command were contract said. SYDNB
 
 # model up
-with COCONUT:
-    loss:
+with COCONUT (with 1 step):
+    loss: ~1.300 +
     sentence:
 
 with MoE & MLA:
-    loss: 
-    sentence:
+    loss: 1.4007 +
+    sentence: Good Morning Holms said Tom England Sunaran's killing a for alroud-more wa
+
+
+########## ULTIMATE MONSTR
+self.embed_size = 1536          # embedding dimension
+self.heads_size = 24            # attention heads
+self.num_layers = 28            # transformer layers
+self.max_len = 4096             # context length
+self.dropout = 0.1              # dropout rate
+self.ff_hidden_mult = 4         # FFN hidden multiplier (6144 = 1536*4)
+self.n_shared = 1               # number of shared experts
+self.n_experts = 4              # total number of MoE experts per layer
+self.top_k_experts = 2          # active experts per token
+self.d_kv_comp = 1152           # KV compression dimension (~3/4 of embed_size)
+self.num_latents = 64           # latent tokens (scratchpad)
+self.num_reasoning_steps = 3    # inner reasoning / thinking steps
+self.d_rope = 128                # RoPE dimension per head (~head_dim / 2)

@@ -9,7 +9,7 @@ def generate(input):
     with torch.no_grad():
         prompt = input
         context_ids = torch.tensor([stoi[c] for c in prompt], dtype=torch.long).unsqueeze(0).to(device)
-        output = model.sample(context_ids, max_new_tokens=50, temperature=1.0)[0] 
+        output = model.sample(context_ids, max_new_tokens=100, temperature=1.0, add_sos=False)[0] 
         generated_text = "".join([itos[i.item()] for i in output])
         print(f"generated: {generated_text}")
 
@@ -22,7 +22,7 @@ if __name__ == "__main__":
         num_reasoning_steps=config.num_reasoning_steps, 
         top_k=config.top_k_samples, 
     )
-    model, stoi, itos = Coconut.load_the_model("weights/model-6.pt", model)
+    model, stoi, itos = Coconut.load_the_model("weights/model-coconut-1.pt", model)
     model.model.to(device)
 
     model.eval()

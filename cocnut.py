@@ -15,8 +15,10 @@ class Coconut(nn.Module):
         d = transformer.token_emb.embedding_dim
 
         self.latents = nn.Parameter(torch.randn(num_latents, d))
+        nn.init.xavier_uniform(self.latents)
         self.sot = nn.Parameter(torch.zeros(1, d))
         self.eot = nn.Parameter(torch.zeros(1, d))
+        self.stoi = None
         nn.init.normal_(self.sot, std=0.02)
         nn.init.normal_(self.eot, std=0.02)
 
@@ -121,11 +123,12 @@ class Coconut(nn.Module):
         coconut.model.load_state_dict(checkpoint["transformer_state"])
 
         coconut.load_state_dict(checkpoint["coconut_state"])
+        coconut.stoi = stoi
 
         return coconut, stoi, itos
 
     @torch.no_grad()
-    def sample(self, context, max_new_tokens=20, temperature=1.0, run_inner_at_inference=True):
+    def sample(self, context, max_new_tokens=20, temperature=1.0, run_inner_at_inference=True, add_sos=False):
         # NOTE: do NOT use @torch.no_grad() decorator on this method
         self.model.eval()
         device = context.device
@@ -174,7 +177,10 @@ class Coconut(nn.Module):
         out_tokens = [context[:, i:i+1] for i in range(T)]
         with torch.no_grad():
             for _ in range(max_new_tokens):
-                idx_cond = torch.cat(out_tokens, dim=1)  # [B, cur_len]
+                idx_cond = torch.cat(out_tokens, dim=1)
+                if add_sos:
+                    sos_id = self.stoi['<sos>']
+                    idx_cond = torch.tensor([[sos_id]], dtype=torch.long, device=device)
                 logits, _ = self.model(idx_cond)
                 last_logits = logits[:, -1, :] / max(temperature, 1e-8)
                 if self.top_k is not None:
@@ -184,8 +190,15 @@ class Coconut(nn.Module):
                 probs = F.softmax(last_logits, dim=-1)
                 # protect against NaNs / zero-sum
                 probs = torch.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
+                sums = probs.sum(dim=-1, keepdim=True)
+                zero_rows = (sums == 0).squeeze(-1)
+                if zero_rows.any():
+                    probs[zero_rows] = 1.0 / float(last_logits.size(-1))
                 probs = probs / probs.sum(dim=-1, keepdim=True).clamp_min(1e-9)
                 next_token = torch.multinomial(probs, num_samples=1)
+
+                if next_token == self.stoi["<eos>"]:
+                    break
                 out_tokens.append(next_token)
 
         self.model.train()

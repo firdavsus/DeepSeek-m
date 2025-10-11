@@ -7,6 +7,7 @@ from torch.cuda.amp import autocast, GradScaler
 import csv
 import random, math
 from torch.nn.utils.rnn import pad_sequence
+from torch import amp
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -60,6 +61,7 @@ def prepare_data_char(path, extra_tokens=None):
     return data, stoi, itos
 
 def get_sequential_batches_random(data, batch_size, seq_len, rand_pad_max=0, pad_idx=0, device='cpu'):
+    seq_len = seq_len-1
     num_sequences = (data.size(0) - 1) // seq_len
     usable_len = num_sequences * seq_len + 1
     data = data[:usable_len]
@@ -87,8 +89,11 @@ def get_sequential_batches_random(data, batch_size, seq_len, rand_pad_max=0, pad
         yield batch_seq 
 
 
-def train(model, data, stoi, itos, epochs, print_each=1000, coconut=False):
-    model.train().to(device)
+def train(model, data, stoi, itos, epochs, print_each=250, coconut=False):
+    if coconut:
+        model.model.train().to(device)
+    else:
+        model.train().to(device)
     pad_idx = stoi['<pad>']
 
     hidden_weights = []
@@ -137,7 +142,7 @@ def train(model, data, stoi, itos, epochs, print_each=1000, coconut=False):
         dict(params=hidden_gains_biases+nonhidden_params, use_muon=False,
             lr=3e-4, betas=(0.9, 0.95), weight_decay=0.01),
     ]
-    scaler = GradScaler()
+    scaler = amp.GradScaler() 
     optimizer_adam = Muon(param_groups)
 
     for epoch in range(epochs):
@@ -145,7 +150,7 @@ def train(model, data, stoi, itos, epochs, print_each=1000, coconut=False):
 
         for idx, single in enumerate(batch):
             single=single.to(device)
-            optimizer_adam.zero_grad()
+            optimizer_adam.zero_grad(set_to_none=True)
             #optimizer_muon.zero_grad()
             with torch.cuda.amp.autocast():
                 logits, aux_loss = model(single[:, :-1])
@@ -154,34 +159,51 @@ def train(model, data, stoi, itos, epochs, print_each=1000, coconut=False):
                     single[:, 1:].reshape(-1),
                     ignore_index=pad_idx
                 )
-                loss += 0.0005 * aux_loss
+                loss += 0.0001 * aux_loss
 
             scaler.scale(loss).backward()
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer_adam.step()
+
+            # шаг оптимизатора через scaler
+            scaler.step(optimizer_adam)
+            scaler.update()
+            optimizer_adam.zero_grad(set_to_none=True)
 
             if idx%print_each==0:
                 print(f"Epoch {epoch} Loss: {loss.item():.4f} aux_loss: {aux_loss.item():.4f} --- {idx}/{len(data)//config.batch_size}")
-                model.eval()
+                if coconut:
+                    model.model.eval()
+                else:
+                    model.eval()
                 with torch.no_grad():
                     prompt = "Good Morning Holms said "
                     context_ids = torch.tensor([stoi[c] for c in prompt], dtype=torch.long).unsqueeze(0).to(device)
-                    output = model.sample(context_ids, max_new_tokens=50, temperature=1.0)[0] 
+                    output = model.sample(context_ids, max_new_tokens=50, temperature=1.0)[0]
                     generated_text = "".join([itos[i.item()] for i in output])
                     print(f"loss: {loss.item():.4f} aux_loss: {aux_loss.item():.4f} Sample: {generated_text}")
-                model.train()
+                if coconut:
+                    model.model.train()
+                else:
+                    model.train()
 
         print(f"Epoch {epoch} Loss: {loss.item():.4f} aux_loss: {aux_loss.item():.4f}")
 
         #example performance
-        model.eval()
+        if coconut:
+            model.model.eval()
+        else:
+            model.eval()
         with torch.no_grad():
             prompt = "Good Morning Holms said "
             context_ids = torch.tensor([stoi[c] for c in prompt], dtype=torch.long).unsqueeze(0).to(device)
-            output = model.sample(context_ids, max_new_tokens=50, temperature=1.0)[0] 
+            output = model.sample(context_ids, max_new_tokens=50, temperature=1.0)[0]
             generated_text = "".join([itos[i.item()] for i in output])
             print(f"loss: {loss.item():.4f} aux_loss: {aux_loss.item():.4f} Sample: {generated_text}")
-        model.train()
+        if coconut:
+            model.model.train()
+        else:
+            model.train()
         if coconut:
             model.save_the_model(f"weights/model-coconut-{epoch}.pt", stoi, itos)
         else:
@@ -189,12 +211,15 @@ def train(model, data, stoi, itos, epochs, print_each=1000, coconut=False):
 
 if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_tf32 = True
+    torch.autograd.set_detect_anomaly(True)
+    torch.cuda.reset_peak_memory_stats()
+
     data, stoi, itos = prepare_data_char("data_text/summary.txt", extra_tokens=config.special_tokens)
 
     model_simple = LLM().to(device)
 
     config.batch_size = 128
-    train(model_simple, data, stoi, itos, epochs=10)
+    train(model_simple, data, stoi, itos, epochs=15)
     torch.save(model_simple.state_dict(), "weights/model-simple-fin.pt")
     print("done, now with a coconut!")
 
@@ -206,8 +231,10 @@ if __name__ == "__main__":
         top_k=config.top_k_samples, 
         inner_lr=5e-5
     )
-    config.batch_size = 32
-    train(model, data, stoi, itos, epochs=10, coconut=True)
+    # model, stoi, itos = Coconut.load_the_model("weights/model-coconut-2.pt", model)
+    model.stoi = stoi
+    config.batch_size = 30
+    train(model, data, stoi, itos, epochs=15, coconut=True)
     model.save_the_model("weights/model-cocnout-fin.pt", stoi, itos)
 
     # final model

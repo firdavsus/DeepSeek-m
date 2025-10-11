@@ -7,21 +7,21 @@ from torch.utils.checkpoint import checkpoint
 class Config:
     def __init__(self):
         self.vocab_size=100
-        self.embed_size = 256
-        self.heads_size = 4
-        self.num_layers = 4
-        self.max_len = 256
+        self.embed_size = 512
+        self.heads_size = 8
+        self.num_layers = 8
+        self.max_len = 1024
         self.dropout = 0.05
-        self.batch_size = 64
-        self.d_rope = 8
+        self.batch_size = 512
+        self.d_rope = 16
         self.ff_hidden_mult=4
-        self.ffn_dim = 96
-        self.n_shared = 1
+        self.ffn_dim = 384
+        self.n_shared = 2
         self.n_experts = 4
-        self.top_k_experts = 1
-        self.d_kv_comp = 96
-        self.num_latents=1
-        self.num_reasoning_steps=1
+        self.top_k_experts = 2
+        self.d_kv_comp = 384
+        self.num_latents=16
+        self.num_reasoning_steps=2
         self.top_k_samples=40
         self.special_tokens = ["<sos>","<eos>","<pad>", "<unk>"]
 
@@ -64,13 +64,12 @@ class MoE(nn.Module):
         expert_counts = torch.zeros(config.n_experts, device=x.device)
         expert_counts.scatter_add_(0, topk_indices.view(-1),
                                  torch.ones_like(topk_indices.view(-1), dtype=torch.float))
-        #self.aux_loss += expert_counts.float().var() * 0.003  # α1 from paper
 
         expert_fraction = expert_counts / expert_counts.sum()
         balance_loss = expert_fraction.var() * 0.003
 
         mean_prob = probs.mean(dim=0)
-        load_loss = (mean_prob * mean_prob.mean() / (mean_prob + 1e-9)).sum() * 1e-2
+        load_loss = (mean_prob * mean_prob.mean() / (mean_prob + 1e-4)).sum() * 1e-2
 
         self.aux_loss = balance_loss + load_loss
 
@@ -185,8 +184,17 @@ class MLA(nn.Module):
         assert q_base.size(-1) + q_rot.size(-1) == self.d_head
 
         scores = torch.einsum("bqhd,bkhd->bhqk", q, k) / math.sqrt(self.d_head)
-        mask = torch.tril(torch.ones(seq_len, seq_len, device=h.device)).unsqueeze(0).unsqueeze(0)
-        scores = scores.masked_fill(mask == 0, float('-inf'))
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=h.device, dtype=torch.bool), diagonal=1)
+        scores = scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), -1e4)  # НЕ -inf
+    
+        # numerical stabilization: subtract max перед softmax (особенно полезно в fp16)
+        max_scores = scores.amax(dim=-1, keepdim=True)
+        scores = scores - max_scores
+    
+        # DEBUG: проверка на большие значения / NaN
+        if torch.isnan(scores).any() or torch.isinf(scores).any():
+            print(f"[DEBUG] scores min/max: {scores.min().item():.3e}/{scores.max().item():.3e}")
+            raise RuntimeError("NaN/Inf in attention scores")
         attn = F.softmax(scores, dim=-1)
         out = torch.einsum("bhqk,bkhd->bqhd", attn, v)
 
