@@ -7,22 +7,22 @@ from torch.utils.checkpoint import checkpoint
 class Config:
     def __init__(self):
         self.vocab_size=100
-        self.embed_size = 512
-        self.heads_size = 8
-        self.num_layers = 8
-        self.max_len = 1024
+        self.embed_size = 768
+        self.heads_size = 16
+        self.num_layers = 12
+        self.max_len = 2048
         self.dropout = 0.05
         self.batch_size = 512
         self.d_rope = 16
         self.ff_hidden_mult=4
-        self.ffn_dim = 384
+        self.ffn_dim = 576
         self.n_shared = 2
-        self.n_experts = 4
+        self.n_experts = 6
         self.top_k_experts = 2
-        self.d_kv_comp = 384
-        self.num_latents=16
-        self.num_reasoning_steps=2
-        self.top_k_samples=40
+        self.d_kv_comp = 576
+        self.num_latents=32
+        self.num_reasoning_steps=3
+        self.top_k_samples=20
         self.special_tokens = ["<sos>","<eos>","<pad>", "<unk>"]
 
 config = Config()
@@ -42,14 +42,12 @@ class Expert(nn.Module):
         return self.w2(self.act(self.w1(x)))
     
 class MoE(nn.Module):
-    def __init__(self):
+    def __init__(self, shared_experts):
         super().__init__()
-        self.shared_experts = nn.ModuleList([Expert() for _ in range(config.n_shared)])
+        self.shared_experts = shared_experts
         self.routed_experts = nn.ModuleList([Expert() for _ in range(config.n_experts)])
         self.gate = nn.Linear(config.embed_size, config.n_experts)
-
         nn.init.xavier_uniform_(self.gate.weight)
-        self.aux_loss = 0.0
 
     def forward(self, x):
         # Shared experts process all tokens
@@ -71,7 +69,7 @@ class MoE(nn.Module):
         mean_prob = probs.mean(dim=0)
         load_loss = (mean_prob * mean_prob.mean() / (mean_prob + 1e-4)).sum() * 1e-2
 
-        self.aux_loss = balance_loss + load_loss
+        aux_loss = balance_loss + load_loss
 
         # Sparse computation
         routed_out = torch.zeros_like(x)
@@ -81,16 +79,16 @@ class MoE(nn.Module):
 
             for expert_idx in range(config.n_experts):
                 mask = (expert_mask == expert_idx)
-                if mask.any():
-                    expert_out = self.routed_experts[expert_idx](x[mask])
-                    expert_contrib[mask] = expert_out * topk_probs[..., k][mask].unsqueeze(-1)
+                selected_x = x * mask.unsqueeze(-1)
+                expert_out = self.routed_experts[expert_idx](selected_x)
+                expert_contrib += expert_out * mask.unsqueeze(-1) * topk_probs[..., k].unsqueeze(-1)
 
             routed_out += expert_contrib
 
         out = shared_out
         if config.top_k_experts != 0:
             out = shared_out + routed_out
-        return out
+        return out, aux_loss
 
 # # ----- SwiGLU -----
 class SwiGLU(nn.Module):
@@ -191,55 +189,51 @@ class MLA(nn.Module):
         max_scores = scores.amax(dim=-1, keepdim=True)
         scores = scores - max_scores
     
-        # DEBUG: проверка на большие значения / NaN
-        if torch.isnan(scores).any() or torch.isinf(scores).any():
-            print(f"[DEBUG] scores min/max: {scores.min().item():.3e}/{scores.max().item():.3e}")
-            raise RuntimeError("NaN/Inf in attention scores")
         attn = F.softmax(scores, dim=-1)
         out = torch.einsum("bhqk,bkhd->bqhd", attn, v)
 
         return self.output(out.contiguous().view(batch_size, seq_len, -1)), (c_kv, k_rot)
 
-
 class Block(nn.Module):
-    def __init__(self):
+    def __init__(self, shared_experts):
         super().__init__()
         self.norm1 = nn.RMSNorm(config.embed_size)
         self.attn = MLA()
         self.norm2 = nn.RMSNorm(config.embed_size)
-        self.moe = MoE()
+        # Pass the global shared experts to MoE
+        self.moe = MoE(shared_experts=shared_experts)
 
     def forward(self, x, past_kv=None):
-        # Attention with KV cache
         attn_out, new_kv = checkpoint(self.attn, self.norm1(x), past_kv, use_reentrant=False)
         x = x + attn_out
-
-        # MoE with checkpointing
-        moe_out = checkpoint(self.moe, self.norm2(x), use_reentrant=False)
+        moe_out, aux_loss = checkpoint(self.moe, self.norm2(x), use_reentrant=False)
         x = x + moe_out
-
-        return x, new_kv
+        return x, new_kv, aux_loss
     
 class LLM(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_emb = nn.Embedding(config.vocab_size, config.embed_size)
-        self.blocks    = nn.ModuleList(
-            [Block() for _ in range(config.num_layers)]
-        )
+
+        # Create global shared experts once
+        self.shared_experts = nn.ModuleList([Expert() for _ in range(config.n_shared)])
+
+        self.blocks = nn.ModuleList([Block(shared_experts=self.shared_experts) for _ in range(config.num_layers)])
         self.ln_f = nn.RMSNorm(config.embed_size)
         self.lm_head = nn.Linear(config.embed_size, config.vocab_size, bias=False)
-        nn.init.xavier_uniform(self.lm_head.weight)
+        nn.init.xavier_uniform_(self.lm_head.weight)
 
     def forward(self, idx):
         x = self.token_emb(idx)
-        total_aux_loss = 0.0
-
+        aux_losses = []
+    
         for block in self.blocks:
-            x, _ = block(x)
-            total_aux_loss += block.moe.aux_loss
+            x, _, aux_loss = block(x)
+            aux_losses.append(aux_loss)
+    
         x = self.ln_f(x)
         logits = self.lm_head(x)
+        total_aux_loss = sum(aux_losses) / len(aux_losses)
         return logits, total_aux_loss
     
     @torch.no_grad()

@@ -49,7 +49,7 @@ def get_sequential_batches_random(data, masks, batch_size, device, pad_idx):
 
 
 ## train loop----------------------------------------------
-def train(model, data, masks, stoi, itos, epochs, print_each=1000, accumulation_steps=8):
+def train(model, data, masks, stoi, itos, epochs, print_each=100, accumulation_steps=8):
     model.train().to(device)
 
     # build param groups (your code)
@@ -172,8 +172,8 @@ if __name__ == "__main__":
         top_k=config.top_k_samples, 
         inner_lr=6e-6
     )
-    config.batch_size = 64
-    model, stoi, itos = Coconut.load_the_model("weights/model-coconout-fin.pt", model)
+    config.batch_size = 400
+    model, stoi, itos = Coconut.load_the_model("weights/model-coconut-fin.pt", model)
     data, masks = get_data("fine_tunin_data/alpaca.csv", stoi)
     train(model, data, masks, stoi, itos, epochs=20)
 

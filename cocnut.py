@@ -15,7 +15,7 @@ class Coconut(nn.Module):
         d = transformer.token_emb.embedding_dim
 
         self.latents = nn.Parameter(torch.randn(num_latents, d))
-        nn.init.xavier_uniform(self.latents)
+        nn.init.xavier_uniform_(self.latents)
         self.sot = nn.Parameter(torch.zeros(1, d))
         self.eot = nn.Parameter(torch.zeros(1, d))
         self.stoi = None
@@ -31,15 +31,16 @@ class Coconut(nn.Module):
 
     def _run_blocks_on_embeddings(self, sot, latents, prompt_embed, eot=None):
         x = torch.cat([sot, latents, prompt_embed] + ([] if eot is None else [eot]), dim=1)  # [B, L, D]
-        total_aux_loss = 0.0
-
+        aux_losses = []
+    
         for block in self.model.blocks:
-            x, _ = block(x)
-            total_aux_loss += block.moe.aux_loss
+            x, _, aux_loss = block(x)  # block.forward now returns x, new_kv, aux_loss
+            aux_losses.append(aux_loss)
+    
         x = self.model.ln_f(x)
         logits = self.model.lm_head(x)
+        total_aux_loss = sum(aux_losses) / len(aux_losses)
         return logits, total_aux_loss
-        return logits, aux_loss
 
     def forward(self, idx):
         INNER_GRAD_MAX_NORM = 0.5  
@@ -97,37 +98,39 @@ class Coconut(nn.Module):
 
         logits_all_final, aux_loss = self._run_blocks_on_embeddings(sot, latents, prompt_embed, eot=eot)
         logits_prompt_final = logits_all_final[:, 1 + self.num_latents : 1 + self.num_latents + T, :]  # [B, T, V]
-
+        aux_loss = torch.nan_to_num(aux_loss, nan=0.0, posinf=1e3, neginf=-1e3)
+        logits_prompt_final = torch.nan_to_num(logits_prompt_final , nan=0.0, posinf=1e3, neginf=-1e3)
         return logits_prompt_final, aux_loss
     
     def save_the_model(self, path, stoi, itos):
+    # coconut_state should contain only coconut-specific params (no 'model.' keys)
+        full_state = self.state_dict()
+        coconut_state = {k: v for k, v in full_state.items() if not k.startswith("model.")}
         checkpoint = {
-            "transformer_state": self.model.state_dict(),  # transformer weights
-            "coconut_state": self.state_dict(),           # latents, sot, eot, inner_lrs
-            "stoi": stoi,                                    # vocabulary: token -> index
-            "itos": itos                                     # vocabulary: index -> token
+            "transformer_state": self.model.state_dict(),
+            "coconut_state": coconut_state,
+            "stoi": stoi,
+            "itos": itos
         }
-
         torch.save(checkpoint, path)
     
     @staticmethod
     def load_the_model(path, coconut):
-        checkpoint = torch.load(path, map_location="cpu")  
-
+        checkpoint = torch.load(path, map_location="cpu")
         stoi = checkpoint["stoi"]
         itos = checkpoint["itos"]
 
         if coconut.model.token_emb.num_embeddings != len(stoi):
             config.vocab_size = len(stoi)
             coconut.model = LLM()
+
         coconut.model.load_state_dict(checkpoint["transformer_state"])
-
-        coconut.load_state_dict(checkpoint["coconut_state"])
+        # load only coconut keys back
+        coconut_state = checkpoint["coconut_state"]
+        coconut.load_state_dict({k: v for k, v in coconut_state.items()}, strict=False)
         coconut.stoi = stoi
-
         return coconut, stoi, itos
 
-    @torch.no_grad()
     def sample(self, context, max_new_tokens=20, temperature=1.0, run_inner_at_inference=True, add_sos=False):
         # NOTE: do NOT use @torch.no_grad() decorator on this method
         self.model.eval()
@@ -203,4 +206,3 @@ class Coconut(nn.Module):
 
         self.model.train()
         return torch.cat(out_tokens, dim=1)
-

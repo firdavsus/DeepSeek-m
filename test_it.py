@@ -22,7 +22,7 @@ if __name__ == "__main__":
         num_reasoning_steps=config.num_reasoning_steps, 
         top_k=config.top_k_samples, 
     )
-    model, stoi, itos = Coconut.load_the_model("weights/model-coconut-1.pt", model)
+    model, stoi, itos = Coconut.load_the_model("weights/model-coconut-4.pt", model)
     model.model.to(device)
 
     model.eval()
