@@ -206,3 +206,4 @@ class Coconut(nn.Module):
 
         self.model.train()
         return torch.cat(out_tokens, dim=1)
+
