@@ -6,9 +6,41 @@ from torch.cuda.amp import autocast, GradScaler
 from model import LLM, config
 import torch.nn.functional as F
 from cocnut import Coconut
+from sklearn.model_selection import train_test_split
+import pickle
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+@torch.no_grad()
+def evaluate(model, data, masks, stoi):
+    model.eval()
+    pad_idx = stoi['<pad>']
+    total_loss = 0.0
+    total_tokens = 0
+
+    batches = get_sequential_batches_random(data, masks, config.batch_size, device, pad_idx)
+    for single, mask in batches:
+        single = single.to(device)
+        mask = mask.to(device)
+
+        logits, aux_loss = model(single[:, :-1])
+        targets = single[:, 1:]
+        mask_tgt = mask[:, 1:]
+
+        loss_per_token = F.cross_entropy(
+            logits.reshape(-1, config.vocab_size),
+            targets.reshape(-1),
+            reduction="none",
+            ignore_index=pad_idx
+        )
+
+        mask_float = mask_tgt.reshape(-1).float()
+        loss = (loss_per_token * mask_float).sum()
+        total_loss += loss.item()
+        total_tokens += mask_float.sum().item()
+
+    model.train()
+    return total_loss / max(total_tokens, 1)
 
 def get_data(path, stoi):
     data = []
@@ -19,8 +51,8 @@ def get_data(path, stoi):
         next(reader)
 
         for instr, inp, out, *_ in reader:
-            seq = ['<sos>'] + list(instr) + list(inp) + ['<sos>'] + list(out) + ['<eos>']
-            prefix_len = len(['<sos>'] + list(instr) + list(inp) + ['<sos>'])
+            seq = ['<sos>'] + list(instr) + list(inp) + list(out) + ['<eos>']
+            prefix_len = len(['<sos>'] + list(instr) + list(inp))
             mask = [0 if i < prefix_len else 1 for i in range(len(seq))]
 
             if len(seq)>config.max_len:
@@ -49,7 +81,7 @@ def get_sequential_batches_random(data, masks, batch_size, device, pad_idx):
 
 
 ## train loop----------------------------------------------
-def train(model, data, masks, stoi, itos, epochs, print_each=100, accumulation_steps=8):
+def train(model, data, val_data, masks, val_masks, stoi, itos, epochs, print_each=250, accumulation_steps=8):
     model.train().to(device)
 
     # build param groups (your code)
@@ -78,7 +110,7 @@ def train(model, data, masks, stoi, itos, epochs, print_each=100, accumulation_s
         nonhidden_params.append(p)
 
     param_groups = [
-        dict(params=hidden_weights, use_muon=True, lr=0.0001, weight_decay=0.01),
+        dict(params=hidden_weights, use_muon=True, lr=0.0003, weight_decay=0.01),
         dict(params=hidden_gains_biases + nonhidden_params, use_muon=False, lr=2e-5, betas=(0.9, 0.95), weight_decay=0.01),
     ]
 
@@ -154,28 +186,40 @@ def train(model, data, masks, stoi, itos, epochs, print_each=100, accumulation_s
                     generated_text = "".join([itos[i.item()] for i in output])
                     print("Sample:", generated_text)
                 model.train()
+                val_loss = evaluate(model, val_data, val_masks, stoi)
+                print(f"Epoch {epoch} validation loss: {val_loss:.4f}")
 
         # end epoch
         print(f"Epoch {epoch} finished.")
         model.save_the_model(f"weights/model-tuned-{epoch}.pt", stoi, itos)
+        val_loss = evaluate(model, val_data, val_masks, stoi)
+        print(f"Epoch {epoch} validation loss: {val_loss:.4f}")
 
+with open('vocab.pkl', 'rb') as f:
+    vocab = pickle.load(f)
 
+stoi = vocab['stoi']
+itos = vocab['itos']
 
 if __name__ == "__main__":
     model_simple = LLM().to(device)
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    model = Coconut(
-        model_simple, 
-        num_latents=config.num_latents, 
-        num_reasoning_steps=config.num_reasoning_steps, 
-        top_k=config.top_k_samples, 
-        inner_lr=6e-6
-    )
-    config.batch_size = 400
-    model, stoi, itos = Coconut.load_the_model("weights/model-coconut-fin.pt", model)
+    # model = Coconut(
+    #     model_simple, 
+    #     num_latents=config.num_latents, 
+    #     num_reasoning_steps=config.num_reasoning_steps, 
+    #     top_k=config.top_k_samples, 
+    #     inner_lr=6e-6
+    # )
     data, masks = get_data("fine_tunin_data/alpaca.csv", stoi)
-    train(model, data, masks, stoi, itos, epochs=20)
+    config.batch_size = 64
+    train_data, val_data, train_masks, val_masks = train_test_split(
+        data, masks, test_size=0.1, random_state=42
+    )
+    # model, stoi, itos = Coconut.load_the_model("weights/model-coconout-fin.pt", model)
+    data, masks = get_data("fine_tunin_data/alpaca.csv", stoi)
+    train(model_simple, train_data, val_data, train_masks, val_masks, masks, stoi, itos, epochs=4)
 
     # final model
     print("final fine-tuned model is ready!!!")
