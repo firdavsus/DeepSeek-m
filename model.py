@@ -237,20 +237,30 @@ class LLM(nn.Module):
         return logits, total_aux_loss
     
     @torch.no_grad()
-    def sample(self, context, max_new_tokens, temperature=1.0, top_k = None):
+    def sample(self, context, max_new_tokens, temperature=1.0, top_k=None, eos_idx=None):
+        generated = []
+        
         for _ in range(max_new_tokens):
-            # Crop context if longer than allowed
             idx_cond = context if context.size(1) <= self.token_emb.num_embeddings else context[:, -self.token_emb.num_embeddings:]
-            logits, axu_loss = self(idx_cond)  # (1, T, vocab_size)
-            logits = logits[:, -1, :] / temperature  # Get last token's logits
-
+            
+            logits, aux_loss = self(idx_cond) 
+            logits = logits[:, -1, :] / temperature 
+            
             if top_k is not None:
                 v, ix = torch.topk(logits, top_k)
                 mask = torch.full_like(logits, float('-inf'))
                 logits = mask.scatter(1, ix, v)
-
+            
             probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)  # Sample from probs
-            context = torch.cat((context, next_token), dim=1)  # Append to sequence
-        return context
+            next_token = torch.multinomial(probs, num_samples=1) 
+            
+            generated.append(next_token)
+            
+            context = torch.cat([context, next_token], dim=1)
+            
+            if eos_idx!=None and next_token.item() == eos_idx:
+                break
+        
+        return torch.cat(generated, dim=1)  
+
     
