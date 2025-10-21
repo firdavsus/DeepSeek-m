@@ -13,6 +13,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from tqdm import tqdm
 from time import time
 import pickle
+import matplotlib.pyplot as plt
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -38,7 +39,7 @@ def evaluate(model, dataloader, pad_idx):
 def get_unique_chars(path):
     unique_chars = set()
 
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         reader = csv.reader(f)
         next(reader)  # skip header
 
@@ -139,21 +140,23 @@ def train(model, dataloader, dataloader_val, stoi, itos, epochs, print_each=500,
         dict(
             params=hidden_weights,
             use_muon=True,
-            lr=0.01,
-            momentum=0.6750,
+            lr=0.03,
+            momentum=0.8750,
             ns_steps=4,
             weight_decay=0.01
         ),
         dict(
             params=hidden_gains_biases + nonhidden_params,
             use_muon=False,
-            lr=4e-5,
+            lr=3e-4,
             betas=(0.9, 0.95),
             weight_decay=0.0
         ),
     ]
     scaler = amp.GradScaler() 
     optimizer_adam = Muon(param_groups)
+
+    train_losses, val_losses, steps, val_steps = [], [], [], []
 
     for epoch in range(epochs):
         current_next_checkpoint = 1
@@ -173,10 +176,13 @@ def train(model, dataloader, dataloader_val, stoi, itos, epochs, print_each=500,
                 )
                 aux_loss = torch.nan_to_num(aux_loss, nan=0.0, posinf=1e3, neginf=-1e3)
                 aux_loss = aux_loss.clamp(-1e3, 1e3)
-                loss += 0.0002 * aux_loss
+                loss += 0.0001 * aux_loss
                 loss_for_backward = loss / accumulation_steps
 
             scaler.scale(loss_for_backward).backward()
+
+            train_losses.append(loss.item())
+            steps.append(epoch * len(dataloader) + idx)
 
             # Gradient accumulation
             do_step = ((idx + 1) % accumulation_steps == 0) or (idx + 1 == len(dataloader))
@@ -190,8 +196,23 @@ def train(model, dataloader, dataloader_val, stoi, itos, epochs, print_each=500,
             # Print status
             if (idx + 1) % print_each == 0:
                 print(f"cross -> Epoch {epoch} Loss: {loss.item():.4f} aux_loss: {aux_loss.item():.4f} --- {idx+1}/{len(dataloader)}")
-                val_loss = evaluate(model, val_loader, pad_idx)
+                val_loss = evaluate(model, dataloader_val, pad_idx)
                 print(f"[Val] Loss: {val_loss:.4f}")
+                val_losses.append(val_loss)
+                val_steps.append(epoch * len(dataloader) + idx)
+
+                # --- Live plot ---
+                plt.figure(figsize=(6, 4))
+                plt.plot(steps, train_losses, label="Train Loss", color="blue", alpha=0.7)
+                plt.plot(val_steps, val_losses, 'o-', label="Val Loss", color="orange", alpha=0.8)
+                plt.xlabel("Step")
+                plt.ylabel("Loss")
+                plt.title("Training & Validation Loss")
+                plt.legend()
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig("training_progress.png")
+                plt.close()
                 
                 # Sample once per print checkpoint
                 if coconut:
@@ -201,7 +222,7 @@ def train(model, dataloader, dataloader_val, stoi, itos, epochs, print_each=500,
                 with torch.no_grad():
                     prompt = "Good Morning Holms said "
                     context_ids = torch.tensor([stoi[c] for c in prompt], dtype=torch.long).unsqueeze(0).to(device)
-                    output = model.sample(context_ids, max_new_tokens=200, temperature=1.0)[0]
+                    output = model.sample(context_ids, max_new_tokens=100, temperature=1.0)[0]
                     generated_text = "".join([itos[i.item()] for i in output])
                     print(f"Sample: {generated_text}")
                 if coconut:
@@ -237,7 +258,7 @@ def train(model, dataloader, dataloader_val, stoi, itos, epochs, print_each=500,
         with torch.no_grad():
             prompt = "Good Morning Holms said "
             context_ids = torch.tensor([stoi[c] for c in prompt], dtype=torch.long).unsqueeze(0).to(device)
-            output = model.sample(context_ids, max_new_tokens=200, temperature=1.0)[0]
+            output = model.sample(context_ids, max_new_tokens=100, temperature=1.0)[0]
             generated_text = "".join([itos[i.item()] for i in output])
         if coconut:
             model.model.train()
@@ -295,15 +316,15 @@ if __name__ == "__main__":
     data, data_val, stoi, itos = prepare_data_char("data_text/combined_text.txt", extra_tokens=config.special_tokens, stoi=stoi, itos=itos)
 
     model_simple = LLM().to(device)
-    model_simple.load_state_dict(torch.load('ready_model/model-simple-0-0.36046621447703875.pt'))
+    # model_simple.load_state_dict(torch.load('ready_model/model-simple-0-0.36046621447703875.pt'))
     print_model_info(model_simple)
 
-    config.batch_size = 52
+    config.batch_size = 256
     pad_idx = stoi['<pad>']
     train_loader = create_dataloader(data, seq_len=config.max_len, batch_size=config.batch_size, pad_idx=stoi['<pad>'])
     val_loader   = create_dataloader(data_val, seq_len=config.max_len, batch_size=config.batch_size, pad_idx=stoi['<pad>'])
 
-    train(model_simple, train_loader, val_loader, stoi, itos, epochs=2, accumulation_steps=4)
+    train(model_simple, train_loader, val_loader, stoi, itos, epochs=30, accumulation_steps=1)
     torch.save(model_simple.state_dict(), "weights/model-simple-fin.pt")
     print("done, now with a coconut!")
 

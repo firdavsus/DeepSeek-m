@@ -14,7 +14,7 @@ itos = vocab['itos']
 
 def generate(input_prompt):
     with torch.no_grad():
-        context_ids = sample_with_prompt(model, stoi, itos, prompt=input_prompt, max_len=256, temperature=1.0, top_k=40)
+        context_ids = sample_with_prompt(model, stoi, itos, prompt=input_prompt, max_len=1024, temperature=1.0, top_k=150)
         generated_text = "".join([itos[i.item()] for i in context_ids])
         print(f"A: {generated_text}")
 
@@ -49,7 +49,7 @@ def sample_with_prompt(model, stoi, itos, prompt="", temperature=1.0, top_k=None
 if __name__ == "__main__":
     # loading model
     model = LLM().to(device)
-    model.load_state_dict(torch.load('model-tuned-1-0.5481.pt'))
+    model.load_state_dict(torch.load('weights/model-tuned-1-0.5481.pt'))
 
     model.to(device)
 

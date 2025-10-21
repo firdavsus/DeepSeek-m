@@ -3,11 +3,11 @@ import os
 
 os.makedirs("data_text", exist_ok=True)
 
-bookcorpus = load_dataset("wikitext", split="wikitext-2-raw-v1")
+bookcorpus = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="train")
 
 # book_part = bookcorpus.shuffle(seed=42).select(range(int(0.25 * len(bookcorpus))))
 
-book_text = " ".join(book_part["text"])
+book_text = " ".join(bookcorpus["text"])
 
 combined_text = book_text
 

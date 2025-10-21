@@ -6,24 +6,24 @@ from torch.utils.checkpoint import checkpoint
 
 class Config:
     def __init__(self):
-        self.vocab_size=1303
-        self.embed_size = 768
-        self.heads_size = 16
-        self.num_layers = 12
-        self.max_len = 2048
-        self.dropout = 0.05
-        self.batch_size = 512
-        self.d_rope = 16
+        self.vocab_size=100
+        self.embed_size = 128
+        self.heads_size = 4
+        self.num_layers = 4
+        self.max_len = 256
+        self.dropout = 0.1
+        self.batch_size = 128
+        self.d_rope = 8
         self.ff_hidden_mult=4
-        self.ffn_dim = 576
-        self.n_shared = 2
-        self.n_experts = 6
-        self.top_k_experts = 2
-        self.d_kv_comp = 576
+        self.ffn_dim = 96
+        self.n_shared = 1
+        self.n_experts = 4
+        self.top_k_experts = 1
+        self.d_kv_comp = 96
         self.num_latents=32
         self.num_reasoning_steps=3
-        self.top_k_samples=20
-        self.special_tokens = ["<sos>","<eos>","<pad>", "<unk>"]
+        self.top_k_samples=40
+        self.special_tokens = ["<sos>","<eos>","<pad>", "<unk>", "<instruction_start>", "<instruction_end>"]
 
 config = Config()
 

@@ -50,28 +50,26 @@ def evaluate(model, data, masks, stoi):
     return total_loss / max(total_tokens, 1)
     
 def _tokenize(text, stoi):
-    """
-    Convert text into token ids using stoi.
-    Handles special tokens <sos> and <eos> as single tokens.
-    Falls back to character mapping for other characters.
-    """
     tokens = []
     i = 0
     L = len(text)
+
+    # Sort special tokens by length (so longer ones like <instruction_start> are matched first)
+    special_tokens = sorted(config.special_tokens, key=len, reverse=True)
+
     while i < L:
-        # check for <sos> or <eos>
-        if text[i:i+5] == "<sos>":
-            tokens.append(stoi["<sos>"])
-            i += 5
-        elif text[i:i+5] == "<eos>":
-            tokens.append(stoi["<eos>"])
-            i += 5
-        elif text[i:i+5] == "<unk>":
-            tokens.append(stoi["<unk>"])
-            i += 5
-        else:
+        matched = False
+        for tok in special_tokens:
+            if text.startswith(tok, i):
+                tokens.append(stoi.get(tok, stoi.get("<unk>", 0)))
+                i += len(tok)
+                matched = True
+                break
+
+        if not matched:
             tokens.append(stoi.get(text[i], stoi.get("<unk>", 0)))
             i += 1
+
     return tokens
 
 
